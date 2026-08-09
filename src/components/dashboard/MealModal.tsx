@@ -76,7 +76,7 @@ export function MealModal({ open, onClose, onSave, initial }: MealModalProps) {
         proteinG: form.protein ? Number(form.protein) : 0,
         carbsG: form.carbs ? Number(form.carbs) : 0,
         fatG: form.fat ? Number(form.fat) : 0,
-        notes: form.notes.trim() || undefined,
+        notes: form.notes.trim(),,
       })
       onClose()
     } catch {
