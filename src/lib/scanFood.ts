@@ -8,8 +8,8 @@ export interface FoodScanResult {
 }
 
 const MAX_INPUT_BYTES = 25 * 1024 * 1024 // refuse absurdly large originals
-const MAX_DIMENSION = 1280 // px — plenty for Gemini to recognise food
-const JPEG_QUALITY = 0.8
+const MAX_DIMENSION = 1024 // px — plenty for Gemini to recognise food
+const JPEG_QUALITY = 0.75
 
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
