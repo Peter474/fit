@@ -40,11 +40,29 @@ async function createZxingReader() {
   return new BrowserMultiFormatReader(hints)
 }
 
+export interface ScanStatus {
+  detector: 'native' | 'zxing'
+  width: number
+  height: number
+  frames: number
+}
+
 /**
  * Starts the rear camera in `video` and calls `onCode` once with the first
  * barcode it reads. Returns a function that stops the camera and the scan.
+ *
+ * We grab frames ourselves instead of handing the stream to a library: each
+ * tick the middle band of the frame (where the viewfinder is) is cropped and
+ * downscaled onto a canvas, which is what makes decoding both fast and
+ * reliable on phones — a full 1080p frame is slow to decode and the bars
+ * are a small part of it. The whole frame is tried every few ticks too, in
+ * case the barcode isn't inside the guide.
  */
-export async function startBarcodeScan(video: HTMLVideoElement, onCode: (code: string) => void): Promise<() => void> {
+export async function startBarcodeScan(
+  video: HTMLVideoElement,
+  onCode: (code: string) => void,
+  onStatus?: (status: ScanStatus) => void,
+): Promise<() => void> {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
     audio: false,
@@ -60,41 +78,83 @@ export async function startBarcodeScan(video: HTMLVideoElement, onCode: (code: s
   await video.play()
 
   let stopped = false
-  let timer: ReturnType<typeof setInterval> | undefined
-  let zxingStop: (() => void) | undefined
-
-  const finish = (code: string) => {
-    if (stopped) return
-    stopped = true
-    onCode(code)
-  }
+  let timer: ReturnType<typeof setTimeout> | undefined
 
   const stop = () => {
     stopped = true
-    if (timer) clearInterval(timer)
-    zxingStop?.()
+    if (timer) clearTimeout(timer)
     stream.getTracks().forEach((t) => t.stop())
     video.srcObject = null
   }
 
   const native = getNativeDetector()
-  if (native) {
-    timer = setInterval(async () => {
-      if (stopped || video.readyState < 2) return
-      try {
-        const found = await native.detect(video)
-        if (found[0]?.rawValue) finish(found[0].rawValue)
-      } catch {
-        // A single failed frame is normal — keep scanning.
-      }
-    }, 200)
-  } else {
-    const reader = await createZxingReader()
-    const controls = await reader.decodeFromStream(stream, video, (result) => {
-      if (result) finish(result.getText())
-    })
-    zxingStop = () => controls.stop()
+  const zxing = await createZxingReader()
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) throw new Error('Canvas is not available in this browser.')
+
+  let tick = 0
+  let lastStatus = 0
+
+  const grab = (full: boolean) => {
+    const vw = video.videoWidth
+    const vh = video.videoHeight
+    const sx = full ? 0 : Math.round(vw * 0.05)
+    const sy = full ? 0 : Math.round(vh * 0.25)
+    const sw = full ? vw : Math.round(vw * 0.9)
+    const sh = full ? vh : Math.round(vh * 0.5)
+    const scale = Math.min(1, 1400 / sw)
+    canvas.width = Math.max(1, Math.round(sw * scale))
+    canvas.height = Math.max(1, Math.round(sh * scale))
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
   }
+
+  const loop = async () => {
+    if (stopped) return
+    if (video.readyState >= 2 && video.videoWidth > 0) {
+      tick++
+      const full = tick % 5 === 0
+      grab(full)
+
+      let code: string | null = null
+      if (native) {
+        try {
+          const found = await native.detect(canvas)
+          if (found[0]?.rawValue) code = found[0].rawValue
+        } catch {
+          // ignore a bad frame
+        }
+      }
+      // ZXing every tick when there's no native detector; as a backup every
+      // 3rd tick when there is one.
+      if (!code && (!native || tick % 3 === 0)) {
+        try {
+          code = zxing.decodeFromCanvas(canvas).getText()
+        } catch {
+          // NotFoundException on frames with no barcode is normal.
+        }
+      }
+
+      if (code && !stopped) {
+        stopped = true
+        onCode(code)
+        return
+      }
+
+      const now = Date.now()
+      if (onStatus && now - lastStatus > 1000) {
+        lastStatus = now
+        onStatus({
+          detector: native ? 'native' : 'zxing',
+          width: video.videoWidth,
+          height: video.videoHeight,
+          frames: tick,
+        })
+      }
+    }
+    if (!stopped) timer = setTimeout(loop, 100)
+  }
+  timer = setTimeout(loop, 100)
 
   return stop
 }
