@@ -95,7 +95,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return
   }
 
-  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash'
+  // Google retires Gemini model versions quickly (gemini-2.0-flash shut down on
+  // 1 Jun 2026, gemini-2.5-flash on 16 Oct 2026), so default to the
+  // `gemini-flash-latest` alias, which always points at the current Flash
+  // model. Set GEMINI_MODEL to pin a specific one.
+  const model = process.env.GEMINI_MODEL || 'gemini-flash-latest'
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
 
   try {
@@ -119,12 +123,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!geminiRes.ok) {
       const errBody = await geminiRes.text()
       console.error('Gemini API error', geminiRes.status, errBody)
-      if (geminiRes.status === 400 || geminiRes.status === 403) {
-        res.status(502).json({ error: 'Gemini rejected the request — check GEMINI_API_KEY is valid and enabled.' })
+      let detail = ''
+      try {
+        detail = (JSON.parse(errBody) as { error?: { message?: string } }).error?.message ?? ''
+      } catch {
+        // body wasn't JSON — ignore
+      }
+      detail = detail.slice(0, 200)
+      if (geminiRes.status === 404) {
+        res.status(502).json({
+          error: `Gemini model "${model}" isn't available (it may have been retired). In Vercel set GEMINI_MODEL to a current model, e.g. gemini-flash-latest, then redeploy.`,
+        })
+      } else if (geminiRes.status === 400 || geminiRes.status === 403) {
+        res.status(502).json({ error: `Gemini rejected the request${detail ? `: ${detail}` : ' — check GEMINI_API_KEY is valid and enabled.'}` })
       } else if (geminiRes.status === 429) {
-        res.status(429).json({ error: 'Gemini rate limit reached. Please wait a moment and try again.' })
+        res.status(429).json({ error: 'Gemini rate limit or quota reached. Please wait a moment and try again.' })
       } else {
-        res.status(502).json({ error: 'The AI service failed to analyze the photo. Please try again.' })
+        res.status(502).json({ error: `The AI service failed (status ${geminiRes.status})${detail ? `: ${detail}` : '.'}` })
       }
       return
     }
